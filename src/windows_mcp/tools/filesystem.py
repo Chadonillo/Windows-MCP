@@ -12,7 +12,7 @@ from fastmcp import Context
 def register(mcp, *, get_desktop, get_analytics):
     @mcp.tool(
         name='FileSystem',
-        description="Manages file system operations with eight modes: 'read' (read text file contents with optional line offset/limit), 'write' (create or overwrite a file, set append=True to append), 'copy' (copy file or directory to destination), 'move' (move or rename file/directory), 'delete' (delete file or directory, set recursive=True for non-empty dirs), 'list' (list directory contents with optional pattern filter), 'search' (find files matching a glob pattern), 'info' (get file/directory metadata like size, dates, type). Relative paths are resolved from the user's Desktop folder. Use absolute paths to access other locations.",
+        description="Manages file system operations with eight modes: 'read' (read text file contents with optional line offset/limit), 'write' (create or overwrite a file, set append=True to append), 'copy' (copy file or directory to destination), 'move' (move or rename file/directory), 'delete' (move a file or directory to the Recycle Bin, set recursive=True for non-empty dirs, set permanent=True to bypass the Recycle Bin and delete irreversibly), 'list' (list directory contents with optional pattern filter), 'search' (find files matching a glob pattern), 'info' (get file/directory metadata like size, dates, type). Relative paths are resolved from the user's Desktop folder. Use absolute paths to access other locations.",
         annotations=ToolAnnotations(
             title="FileSystem",
             readOnlyHint=False,
@@ -35,6 +35,7 @@ def register(mcp, *, get_desktop, get_analytics):
         limit: int | None = None,
         encoding: str = 'utf-8',
         show_hidden: bool | str = False,
+        permanent: bool | str = False,
         ctx: Context = None,
     ) -> str:
         try:
@@ -49,6 +50,7 @@ def register(mcp, *, get_desktop, get_analytics):
             append = append is True or (isinstance(append, str) and append.lower() == 'true')
             overwrite = overwrite is True or (isinstance(overwrite, str) and overwrite.lower() == 'true')
             show_hidden = show_hidden is True or (isinstance(show_hidden, str) and show_hidden.lower() == 'true')
+            permanent = permanent is True or (isinstance(permanent, str) and permanent.lower() == 'true')
 
             match mode:
                 case 'read':
@@ -66,7 +68,7 @@ def register(mcp, *, get_desktop, get_analytics):
                         return 'Error: destination parameter is required for move mode.'
                     return filesystem.move_path(path, destination, overwrite=overwrite)
                 case 'delete':
-                    return filesystem.delete_path(path, recursive=recursive)
+                    return filesystem.delete_path(path, recursive=recursive, permanent=permanent)
                 case 'list':
                     return filesystem.list_directory(path, pattern=pattern, recursive=recursive, show_hidden=show_hidden)
                 case 'search':

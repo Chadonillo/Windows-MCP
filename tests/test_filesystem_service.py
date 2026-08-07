@@ -1,7 +1,10 @@
 import os
 
+import shutil
+
 import pytest
 
+from windows_mcp.filesystem import service
 from windows_mcp.filesystem.service import (
     read_file,
     write_file,
@@ -122,39 +125,136 @@ class TestMovePath:
 
 
 class TestDeletePath:
-    def test_delete_file(self, tmp_path):
+    @pytest.fixture
+    def recycled(self, monkeypatch):
+        """Replace the shell call so tests never touch the real Recycle Bin.
+
+        Returns the list of paths the service asked to recycle.
+        """
+        calls = []
+
+        def fake_recycle(target):
+            calls.append(str(target))
+            if target.is_dir():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+
+        monkeypatch.setattr(service, "_send_to_recycle_bin", fake_recycle)
+        return calls
+
+    def test_delete_file_recycles_by_default(self, tmp_path, recycled):
         f = tmp_path / "del.txt"
         f.write_text("bye", encoding="utf-8")
         result = delete_path(str(f))
-        assert "Deleted file" in result
+        assert "Moved file to Recycle Bin" in result
+        assert recycled == [str(f.resolve())]
         assert not f.exists()
 
-    def test_delete_empty_dir(self, tmp_path):
+    def test_delete_file_permanent_bypasses_recycle_bin(self, tmp_path, recycled):
+        f = tmp_path / "del.txt"
+        f.write_text("bye", encoding="utf-8")
+        result = delete_path(str(f), permanent=True)
+        assert "Permanently deleted file" in result
+        assert recycled == []
+        assert not f.exists()
+
+    def test_delete_empty_dir(self, tmp_path, recycled):
         d = tmp_path / "emptydir"
         d.mkdir()
         result = delete_path(str(d))
-        assert "Deleted directory" in result
+        assert "Moved directory to Recycle Bin" in result
         assert not d.exists()
 
-    def test_delete_nonempty_dir_without_recursive(self, tmp_path):
+    def test_delete_empty_dir_permanent(self, tmp_path, recycled):
+        d = tmp_path / "emptydir"
+        d.mkdir()
+        result = delete_path(str(d), permanent=True)
+        assert "Permanently deleted directory" in result
+        assert recycled == []
+        assert not d.exists()
+
+    def test_delete_nonempty_dir_without_recursive(self, tmp_path, recycled):
         d = tmp_path / "fulldir"
         d.mkdir()
         (d / "file.txt").write_text("x", encoding="utf-8")
         result = delete_path(str(d), recursive=False)
         assert "Error: Directory is not empty" in result
+        assert recycled == []
         assert d.exists()
 
-    def test_delete_nonempty_dir_recursive(self, tmp_path):
+    def test_delete_nonempty_dir_recursive(self, tmp_path, recycled):
         d = tmp_path / "fulldir"
         d.mkdir()
         (d / "file.txt").write_text("x", encoding="utf-8")
         result = delete_path(str(d), recursive=True)
-        assert "Deleted directory" in result
+        assert "Moved directory to Recycle Bin" in result
+        assert not d.exists()
+
+    def test_delete_nonempty_dir_permanent_recursive(self, tmp_path, recycled):
+        d = tmp_path / "fulldir"
+        d.mkdir()
+        (d / "file.txt").write_text("x", encoding="utf-8")
+        result = delete_path(str(d), recursive=True, permanent=True)
+        assert "Permanently deleted directory" in result
+        assert recycled == []
         assert not d.exists()
 
     def test_delete_not_found(self, tmp_path):
         result = delete_path(str(tmp_path / "ghost"))
         assert "Error: Path not found" in result
+
+    def test_failed_recycle_reports_error_and_keeps_file(self, tmp_path, monkeypatch):
+        """A shell failure must not be reported as a successful delete."""
+
+        def boom(target):
+            raise OSError("Recycle failed for X (shell error 120)")
+
+        monkeypatch.setattr(service, "_send_to_recycle_bin", boom)
+        f = tmp_path / "keep.txt"
+        f.write_text("x", encoding="utf-8")
+        result = delete_path(str(f))
+        assert "Error deleting" in result
+        assert f.exists()
+
+
+class TestSendToRecycleBin:
+    """Cover the shell wrapper itself, which the delete tests patch out."""
+
+    @staticmethod
+    def _patch_shfileoperation(monkeypatch, return_value):
+        from win32com.shell import shell
+
+        calls = []
+
+        def fake_op(args):
+            calls.append(args)
+            return return_value
+
+        monkeypatch.setattr(shell, "SHFileOperation", fake_op)
+        return calls
+
+    def test_passes_allowundo_and_absolute_path(self, tmp_path, monkeypatch):
+        from win32com.shell import shellcon
+
+        calls = self._patch_shfileoperation(monkeypatch, (0, False))
+        target = tmp_path / "x.txt"
+        service._send_to_recycle_bin(target)
+
+        (_hwnd, operation, source, _dest, flags, _p, _n) = calls[0]
+        assert operation == shellcon.FO_DELETE
+        assert source == str(target)
+        assert flags & shellcon.FOF_ALLOWUNDO, "must request the Recycle Bin, not a hard delete"
+
+    def test_nonzero_return_code_raises(self, tmp_path, monkeypatch):
+        self._patch_shfileoperation(monkeypatch, (120, False))
+        with pytest.raises(OSError, match="shell error 120"):
+            service._send_to_recycle_bin(tmp_path / "x.txt")
+
+    def test_aborted_raises(self, tmp_path, monkeypatch):
+        self._patch_shfileoperation(monkeypatch, (0, True))
+        with pytest.raises(OSError, match="aborted"):
+            service._send_to_recycle_bin(tmp_path / "x.txt")
 
 
 class TestListDirectory:

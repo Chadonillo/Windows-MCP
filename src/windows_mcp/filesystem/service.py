@@ -144,28 +144,76 @@ def move_path(source: str, destination: str, overwrite: bool = False) -> str:
         return f'Error moving: {e}'
 
 
-def delete_path(path: str, recursive: bool = False) -> str:
-    """Delete a file or directory."""
+def _send_to_recycle_bin(target: Path) -> None:
+    """Delete *target* through the shell so it lands in the Recycle Bin.
+
+    Args:
+        target: Absolute path to the file or directory to recycle.
+
+    Raises:
+        OSError: If the shell reports failure or the operation was aborted.
+
+    Note:
+        Windows silently falls back to a permanent delete when the Recycle Bin
+        is unavailable for the volume — network shares, most removable media,
+        and items larger than the bin's quota. The shell reports success in
+        that case, so callers cannot distinguish it from a real recycle.
+    """
+    from win32com.shell import shell, shellcon
+
+    flags = (
+        shellcon.FOF_ALLOWUNDO
+        | shellcon.FOF_NOCONFIRMATION
+        | shellcon.FOF_NOERRORUI
+        | shellcon.FOF_SILENT
+    )
+    # SHFileOperation requires an absolute path; *target* is already resolved.
+    retcode, aborted = shell.SHFileOperation(
+        (0, shellcon.FO_DELETE, str(target), None, flags, None, None)
+    )
+    if aborted:
+        raise OSError(f'Recycle aborted for {target}')
+    if retcode != 0:
+        raise OSError(f'Recycle failed for {target} (shell error {retcode})')
+
+
+def delete_path(path: str, recursive: bool = False, permanent: bool = False) -> str:
+    """Delete a file or directory, via the Recycle Bin unless *permanent*.
+
+    Recycling is the default so an erroneous delete stays recoverable through
+    Explorer. Pass permanent=True to bypass the bin — needed on volumes with
+    no Recycle Bin, and for items too large for it.
+    """
     target = Path(path).resolve()
 
     if not target.exists():
         return f'Error: Path not found: {target}'
 
+    is_dir = target.is_dir() and not target.is_symlink()
+
     try:
-        if target.is_file() or target.is_symlink():
-            target.unlink()
-            return f'Deleted file: {target}'
-        elif target.is_dir():
-            if not recursive:
-                # Check if directory is empty
-                if any(target.iterdir()):
-                    return f'Error: Directory is not empty: {target}. Set recursive=True to delete non-empty directories.'
-                target.rmdir()
-            else:
-                shutil.rmtree(str(target))
-            return f'Deleted directory: {target}'
-        else:
+        if not (target.is_file() or target.is_symlink() or is_dir):
             return f'Error: Unsupported file type: {target}'
+
+        # Guard non-empty directories the same way regardless of destination:
+        # recursive=True is the caller's acknowledgement of the blast radius.
+        if is_dir and not recursive and any(target.iterdir()):
+            return (
+                f'Error: Directory is not empty: {target}. '
+                'Set recursive=True to delete non-empty directories.'
+            )
+
+        noun = 'directory' if is_dir else 'file'
+
+        if not permanent:
+            _send_to_recycle_bin(target)
+            return f'Moved {noun} to Recycle Bin: {target}'
+
+        if is_dir:
+            target.rmdir() if not recursive else shutil.rmtree(str(target))
+        else:
+            target.unlink()
+        return f'Permanently deleted {noun}: {target}'
     except PermissionError:
         msg = f'Error: Permission denied: {target}'
         if not is_elevated():
