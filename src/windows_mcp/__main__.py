@@ -656,6 +656,10 @@ def serve(
     if transport != Transport.STDIO.value and not allow_insecure_remote:
         if is_loopback_host(host):
             computed_allowed_hosts: list[str] | None = ["localhost", "127.0.0.1", "[::1]"]
+            extra_hosts = os.environ.get("WINDOWS_MCP_TRUSTED_HOSTS", "")
+            computed_allowed_hosts.extend(
+                value.strip() for value in extra_hosts.split(",") if value.strip()
+            )
         elif host not in ("0.0.0.0", "::", ""):
             computed_allowed_hosts = [host]
         else:

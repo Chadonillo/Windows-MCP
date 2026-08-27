@@ -93,6 +93,9 @@ class Desktop:
         display_indices: list[int] | None = None,
         region: list[int] | tuple[int, ...] | None = None,
         max_image_size: Size | None = None,
+        focused_only: bool | str = False,
+        window_name: str | None = None,
+        max_elements: int | None = None,
     ) -> DesktopState:
         use_annotation = use_annotation is True or (
             isinstance(use_annotation, str) and use_annotation.lower() == "true"
@@ -104,8 +107,17 @@ class Desktop:
         use_ui_tree = use_ui_tree is True or (
             isinstance(use_ui_tree, str) and use_ui_tree.lower() == "true"
         )
+        focused_only = focused_only is True or (
+            isinstance(focused_only, str) and focused_only.lower() == "true"
+        )
         as_bytes = as_bytes is True or (isinstance(as_bytes, str) and as_bytes.lower() == "true")
 
+        if focused_only and window_name:
+            raise ValueError("focused_only and window_name are mutually exclusive")
+        if (focused_only or window_name) and (display_indices or region):
+            raise ValueError("window scope cannot be combined with display or region")
+        if (focused_only or window_name) and not use_ui_tree:
+            raise ValueError("focused_only/window_name require use_ui_tree=True")
         if use_dom and not use_ui_tree:
             raise ValueError("use_dom=True requires use_ui_tree=True")
 
@@ -121,20 +133,59 @@ class Desktop:
         state_build_ms = 0.0
         displays = self.get_displays()
         available_displays = [self._display_to_view(display) for display in displays]
+
+        # Resolve an optional window scope before choosing the capture rectangle.
+        # A focused-only capture avoids enumerating every top-level window entirely;
+        # named-window capture enumerates titles once but walks only the matched UIA tree.
+        scope_window = None
+        if use_ui_tree and focused_only:
+            scope_window = self.get_active_window(windows=[])
+            if scope_window is None:
+                raise ValueError("No focused window found")
+        elif use_ui_tree and window_name:
+            candidate_handles = self.get_controls_handles()
+            candidate_windows, _ = self.get_windows(controls_handles=candidate_handles)
+            query = window_name.casefold()
+            exact = [window for window in candidate_windows if window.name.casefold() == query]
+            substring = [window for window in candidate_windows if query in window.name.casefold()]
+            matches = exact or substring
+            if not matches:
+                raise ValueError(f"Window {window_name!r} not found")
+            if len(matches) > 1:
+                candidates = ", ".join(sorted({window.name for window in matches})[:5])
+                raise ValueError(f"Window {window_name!r} is ambiguous; candidates: {candidates}")
+            scope_window = matches[0]
+
+        if scope_window is not None:
+            box = scope_window.bounding_box
+            if scope_window.status in {Status.MINIMIZED, Status.HIDDEN}:
+                raise ValueError(f"Window {scope_window.name!r} is not visible")
+            if box.width <= 0 or box.height <= 0:
+                raise ValueError(f"Window {scope_window.name!r} has empty bounds")
+            if use_dom and not scope_window.is_browser:
+                raise ValueError(f"Window {scope_window.name!r} is not a browser; use_dom is unavailable")
+
         region_rect = self.parse_region_selection(region)
-        capture_rect = (
-            region_rect
-            if region_rect is not None
-            else (
-                self.get_display_union_rect(display_indices, displays) if display_indices else None
-            )
-        )
+        if region_rect is not None:
+            capture_rect = region_rect
+        elif display_indices:
+            capture_rect = self.get_display_union_rect(display_indices, displays)
+        elif scope_window is not None:
+            box = scope_window.bounding_box
+            capture_rect = uia.Rect(box.left, box.top, box.right, box.bottom)
+        else:
+            capture_rect = None
         screenshot_region = self._rect_to_bounding_box(capture_rect) if capture_rect else None
 
         # Fast path for Screenshot tool (use_ui_tree=False): skip window enumeration.
-        # UIAutomation calls (get_controls_handles / get_windows / get_active_window)
-        # can hang when an app is launching and not responding to WM messages.
-        if use_ui_tree:
+        # Scoped snapshots similarly avoid unrelated windows and taskbars.
+        if use_ui_tree and scope_window is not None:
+            controls_handles = {scope_window.handle}
+            windows = []
+            windows_handles = {scope_window.handle}
+            active_window = scope_window if focused_only else self.get_active_window(windows=[])
+            active_window_handle = scope_window.handle
+        elif use_ui_tree:
             controls_handles = self.get_controls_handles()  # Taskbar,Program Manager,Apps, Dialogs
             windows, windows_handles = self.get_windows(controls_handles=controls_handles)  # Apps
             active_window = self.get_active_window(windows=windows)  # Active Window
@@ -172,8 +223,8 @@ class Desktop:
             other_windows_handles = set(controls_handles - windows_handles)
             if active_window_handle is not None:
                 other_windows_handles.discard(active_window_handle)
-            tree_active_window_handle = active_window_handle
-            if screenshot_region:
+            tree_active_window_handle = scope_window.handle if scope_window else active_window_handle
+            if screenshot_region and scope_window is None:
                 active_window_in_region = (
                     self._filter_window_to_region(active_window, screenshot_region) is not None
                 )
@@ -185,8 +236,12 @@ class Desktop:
                     for window in windows
                     if self._filter_window_to_region(window, screenshot_region) is not None
                 )
+            tree_limit = max_elements
             tree_state = self.tree.get_state(
-                tree_active_window_handle, list(other_windows_handles), use_dom=use_dom
+                tree_active_window_handle,
+                list(other_windows_handles),
+                use_dom=use_dom,
+                max_elements=tree_limit,
             )
         else:
             root_box = screenshot_region or self.tree.screen_box
@@ -207,7 +262,8 @@ class Desktop:
             stage_started_at = perf_counter()
 
         if screenshot_region:
-            active_window = self._filter_window_to_region(active_window, screenshot_region)
+            if scope_window is None:
+                active_window = self._filter_window_to_region(active_window, screenshot_region)
             windows = self._filter_windows_to_region(windows, screenshot_region)
             if use_ui_tree:
                 tree_state = self._filter_tree_state_to_region(tree_state, screenshot_region)
@@ -273,6 +329,7 @@ class Desktop:
         self.desktop_state = DesktopState(
             active_window=active_window,
             windows=windows,
+            scoped_window=scope_window,
             active_desktop=active_desktop,
             all_desktops=all_desktops,
             screenshot=screenshot,
@@ -393,15 +450,19 @@ class Desktop:
         otherwise refresh only when desktop_state is absent or empty.
         """
         if refresh_state or self.desktop_state is None or not self.desktop_state.windows:
-            self.get_state()
-        if self.desktop_state is None:
-            return None, "Failed to get desktop state. Please try again."
-
-        window_list = [
-            w
-            for w in [self.desktop_state.active_window] + (self.desktop_state.windows or [])
-            if w is not None
-        ]
+            # Window lookup needs only top-level titles and handles. A full
+            # get_state() also walks every child UIA element and can take over
+            # a minute on a busy desktop, so enumerate windows directly.
+            controls_handles = self.get_controls_handles()
+            windows, _ = self.get_windows(controls_handles=controls_handles)
+            active_window = self.get_active_window(windows=windows)
+            window_list = [w for w in [active_window, *windows] if w is not None]
+        else:
+            window_list = [
+                w
+                for w in [self.desktop_state.active_window] + (self.desktop_state.windows or [])
+                if w is not None
+            ]
         if not window_list:
             return None, "No windows found on the desktop."
 

@@ -68,6 +68,7 @@ class DesktopState:
     all_desktops: list[dict]
     active_window: Window | None
     windows: list[Window]
+    scoped_window: Window | None = None
     screenshot: Image | None = None
     cursor_position: tuple[int, int] | None = None
     screenshot_original_size: Size | None = None
@@ -94,6 +95,12 @@ class DesktopState:
             return "No active window found"
         headers = ["Name", "Depth", "Status", "Width", "Height", "Handle"]
         return tabulate([self.active_window.to_row()], headers=headers, tablefmt="simple")
+
+    def scoped_window_to_string(self):
+        if not self.scoped_window:
+            return ""
+        headers = ["Name", "Depth", "Status", "Width", "Height", "Handle"]
+        return tabulate([self.scoped_window.to_row()], headers=headers, tablefmt="simple")
 
     def windows_to_string(self):
         if not self.windows:

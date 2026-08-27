@@ -58,14 +58,23 @@ class Tree:
         self.element_budget=TreeElementBudget(resolve_max_tree_elements())
 
 
-    def get_state(self,active_window_handle:int|None,other_windows_handles:list[int],use_dom:bool=False)->TreeState:
+    def get_state(
+        self,
+        active_window_handle: int | None,
+        other_windows_handles: list[int],
+        use_dom: bool = False,
+        max_elements: int | None = None,
+    ) -> TreeState:
         # Reset DOM state to prevent leaks and stale data
         self.dom = None
         self.dom_bounding_box = None
         self.dom_is_ia2 = False
         # Fresh budget per capture — huge lists/grids (e.g. thousands of rows) must not
         # stall UI Automation or blow up the serialized response.
-        self.element_budget = TreeElementBudget(resolve_max_tree_elements())
+        resolved_limit = resolve_max_tree_elements() if max_elements is None else max_elements
+        if isinstance(resolved_limit, bool) or not isinstance(resolved_limit, int) or resolved_limit < 1:
+            raise ValueError("max_elements must be a positive integer")
+        self.element_budget = TreeElementBudget(resolved_limit)
         start_time = perf_counter()
         profile_enabled = _snapshot_profile_enabled()
 

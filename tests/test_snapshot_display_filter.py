@@ -534,6 +534,91 @@ class TestDisplayFiltering:
         assert set(other_handles) == {2, 3, 4}
         assert [node.name for node in state.tree_state.interactive_nodes] == ["文本编辑器"]
 
+    def test_get_state_focused_only_walks_only_foreground_window(self, desktop):
+        desktop.tree = MagicMock()
+        desktop.tree.screen_box = make_box(0, 0, 3840, 1080)
+        desktop.tree.get_state.return_value = TreeState()
+        desktop.get_displays = MagicMock(
+            return_value=[
+                DisplayInfo(
+                    index=0,
+                    device_name="\\\\.\\DISPLAY1",
+                    rect=Rect(0, 0, 1920, 1080),
+                    primary=True,
+                )
+            ]
+        )
+        focused = Window(
+            name="Spotify Premium",
+            is_browser=False,
+            depth=0,
+            status=Status.MAXIMIZED,
+            bounding_box=make_box(0, 0, 1920, 1080),
+            handle=77,
+            process_id=88,
+        )
+        desktop.get_active_window = MagicMock(return_value=focused)
+        desktop.get_controls_handles = MagicMock()
+        desktop.get_windows = MagicMock()
+        desktop.get_cursor_location = MagicMock(return_value=(250, 180))
+
+        with patch(
+            "windows_mcp.desktop.service.get_current_desktop", return_value={"name": "Desktop 1"}
+        ):
+            with patch(
+                "windows_mcp.desktop.service.get_all_desktops", return_value=[{"name": "Desktop 1"}]
+            ):
+                state = desktop.get_state(
+                    use_vision=False,
+                    use_annotation=False,
+                    use_ui_tree=True,
+                    focused_only=True,
+                )
+
+        desktop.get_active_window.assert_called_once_with(windows=[])
+        desktop.get_controls_handles.assert_not_called()
+        desktop.get_windows.assert_not_called()
+        desktop.tree.get_state.assert_called_once_with(
+            77, [], use_dom=False, max_elements=None
+        )
+        assert state.scoped_window is focused
+        assert state.active_window.name == "Spotify Premium"
+        assert state.windows == []
+        assert state.screenshot_region == make_box(0, 0, 1920, 1080)
+
+    def test_get_state_rejects_conflicting_window_scopes(self, desktop):
+        desktop.tree = MagicMock()
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            desktop.get_state(focused_only=True, window_name="Spotify")
+
+    def test_get_state_rejects_window_scope_with_display_or_region(self, desktop):
+        desktop.tree = MagicMock()
+        with pytest.raises(ValueError, match="cannot be combined"):
+            desktop.get_state(focused_only=True, display_indices=[0])
+        with pytest.raises(ValueError, match="cannot be combined"):
+            desktop.get_state(window_name="Spotify", region=[0, 0, 10, 10])
+
+    def test_named_scope_does_not_replace_actual_focused_window(self, desktop):
+        desktop.tree = MagicMock()
+        desktop.tree.screen_box = make_box(0, 0, 1920, 1080)
+        desktop.tree.get_state.return_value = TreeState()
+        desktop.get_displays = MagicMock(
+            return_value=[DisplayInfo(index=0, device_name="display", rect=Rect(0, 0, 1920, 1080), primary=True)]
+        )
+        spotify = Window("Spotify Premium", False, 0, Status.MAXIMIZED, make_box(0, 0, 1920, 1080), 2, 2)
+        word = Window("Word", False, 1, Status.NORMAL, make_box(100, 100, 800, 800), 1, 1)
+        desktop.get_controls_handles = MagicMock(return_value={1, 2})
+        desktop.get_windows = MagicMock(return_value=([word, spotify], {1, 2}))
+        desktop.get_active_window = MagicMock(return_value=word)
+        desktop.get_cursor_location = MagicMock(return_value=(200, 200))
+
+        with patch("windows_mcp.desktop.service.get_current_desktop", return_value={"name": "Desktop 1"}), patch("windows_mcp.desktop.service.get_all_desktops", return_value=[{"name": "Desktop 1"}]):
+            state = desktop.get_state(window_name="Spotify")
+
+        assert state.active_window is word
+        assert state.scoped_window is spotify
+        desktop.tree.get_state.assert_called_once_with(2, [], use_dom=False, max_elements=None)
+
     def test_get_state_skips_tree_capture_when_use_ui_tree_false(self, desktop):
         desktop.tree = MagicMock()
         desktop.tree.screen_box = make_box(0, 0, 1920, 1080)
@@ -619,6 +704,7 @@ class TestDisplayFiltering:
             handle=2,
             process_id=22,
         )
+        desktop.get_screen_box = MagicMock(return_value=make_box(0, 0, 3840, 1080))
         desktop.get_controls_handles = MagicMock(return_value={1, 2, 3})
         desktop.get_windows = MagicMock(return_value=([active_window, widget_window], {1, 2}))
         desktop.get_active_window = MagicMock(return_value=active_window)

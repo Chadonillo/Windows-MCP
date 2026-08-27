@@ -61,6 +61,9 @@ def capture_desktop_state(
     display: list[int] | None,
     region: list[int] | None,
     tool_name: str,
+    focused_only: bool = False,
+    window_name: str | None = None,
+    max_elements: int | None = None,
 ):
     profile_enabled = _snapshot_profile_enabled()
     profile_started_at = time.perf_counter()
@@ -89,6 +92,9 @@ def capture_desktop_state(
         display_indices=display_indices,
         region=region,
         max_image_size=Size(width=MAX_IMAGE_WIDTH, height=MAX_IMAGE_HEIGHT),
+        focused_only=focused_only,
+        window_name=window_name,
+        max_elements=max_elements,
     )
     if profile_enabled:
         desktop_state_ms = (time.perf_counter() - stage_started_at) * 1000
@@ -99,6 +105,7 @@ def capture_desktop_state(
     semantic_tree = desktop_state.tree_state.semantic_tree_to_string()
     windows = desktop_state.windows_to_string()
     active_window = desktop_state.active_window_to_string()
+    scoped_window = desktop_state.scoped_window_to_string()
     active_desktop = desktop_state.active_desktop_to_string()
     all_desktops = desktop_state.desktops_to_string()
     if profile_enabled:
@@ -134,6 +141,7 @@ def capture_desktop_state(
         "semantic_tree": semantic_tree,
         "windows": windows,
         "active_window": active_window,
+        "scoped_window": scoped_window,
         "active_desktop": active_desktop,
         "all_desktops": all_desktops,
         "screenshot_bytes": screenshot_bytes,
@@ -152,6 +160,7 @@ def build_snapshot_response(
     semantic_tree = capture_result["semantic_tree"]
     windows = capture_result["windows"]
     active_window = capture_result["active_window"]
+    scoped_window = capture_result.get("scoped_window", "")
     active_desktop = capture_result["active_desktop"]
     all_desktops = capture_result["all_desktops"]
     screenshot_bytes = capture_result["screenshot_bytes"]
@@ -201,6 +210,7 @@ def build_snapshot_response(
     if ui_detail_note:
         metadata_text += f"{ui_detail_note}\n"
 
+    scoped_section = f"\n    Scoped Window:\n    {scoped_window}\n" if scoped_window else ""
     response_text = dedent(f'''
     {metadata_text}
     Active Desktop:
@@ -211,7 +221,7 @@ def build_snapshot_response(
 
     Focused Window:
     {active_window}
-
+    {scoped_section}
     Opened Windows:
     {windows}
     ''')

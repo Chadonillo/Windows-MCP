@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Callable
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -27,6 +29,15 @@ class FakeDesktop:
         self.states = states
         self.desktop_state: DesktopState | None = None
         self.calls: list[dict[str, object]] = []
+        self.active_window_calls: list[object] = []
+
+    def get_active_window(self, windows=None):
+        self.active_window_calls.append(windows)
+        if self.states:
+            self.desktop_state = self.states.pop(0)
+        if self.desktop_state is None:
+            return None
+        return self.desktop_state.active_window
 
     def get_state(self, **kwargs: object) -> DesktopState:
         self.calls.append(kwargs)
@@ -133,6 +144,31 @@ def test_wait_for_active_window_matches_by_window_name() -> None:
     )
 
     assert "active window matched" in result
+    assert desktop.active_window_calls == [[]]
+    assert desktop.calls == []
+
+
+def test_wait_for_active_window_fast_path_polls_without_tree_capture() -> None:
+    desktop = FakeDesktop(
+        [
+            _state(active_window_name="Explorer"),
+            _state(active_window_name="Spotify Premium"),
+        ]
+    )
+    tools = _register_tools(desktop)
+
+    result = asyncio.run(
+        tools["WaitFor"](
+            condition="active_window",
+            window_name="spotify",
+            timeout=1,
+            interval=0.001,
+        )
+    )
+
+    assert "2 attempt(s)" in result
+    assert desktop.active_window_calls == [[], []]
+    assert desktop.calls == []
 
 
 def test_wait_for_focused_element_matches_text_and_window() -> None:
@@ -225,6 +261,101 @@ def test_wait_for_rejects_invalid_timing_before_capture(argument: str, value: ob
         )
 
     assert desktop.calls == []
+
+
+def test_batch_actions_executes_multiple_generic_actions_in_order(monkeypatch) -> None:
+    desktop = FakeDesktop([_state()])
+    desktop.move = MagicMock()
+    desktop.shortcut = MagicMock()
+    desktop.switch_app = MagicMock(return_value=("Switched", 0))
+    tools = _register_tools(desktop)
+    monkeypatch.setattr("windows_mcp.tools.input.time.sleep", MagicMock())
+
+    result = asyncio.run(
+        tools["BatchActions"](
+            actions=[
+                {"type": "move", "loc": [10, 20]},
+                {"type": "shortcut", "shortcut": "ctrl+l"},
+                {"type": "wait", "duration": 0.1},
+                {"type": "switch_window", "name": "Spotify"},
+            ]
+        )
+    )
+
+    payload = json.loads(result)
+    assert payload["completed"] == 4
+    assert payload["ok"] is True
+    desktop.move.assert_called_once_with([10, 20])
+    desktop.shortcut.assert_called_once_with("ctrl+l")
+    desktop.switch_app.assert_called_once_with("Spotify")
+
+
+def test_batch_actions_invalid_later_action_has_no_side_effects() -> None:
+    desktop = FakeDesktop([_state()])
+    desktop.move = MagicMock()
+    tools = _register_tools(desktop)
+
+    with pytest.raises(ValueError):
+        asyncio.run(
+            tools["BatchActions"](
+                actions=[
+                    {"type": "move", "loc": [10, 20]},
+                    {"type": "click", "loc": [1, 2], "clicks": 99},
+                ]
+            )
+        )
+
+    desktop.move.assert_not_called()
+
+
+def test_batch_actions_rejects_unknown_fields_before_execution() -> None:
+    desktop = FakeDesktop([_state()])
+    desktop.shortcut = MagicMock()
+    tools = _register_tools(desktop)
+
+    with pytest.raises(ValueError):
+        asyncio.run(
+            tools["BatchActions"](
+                actions=[{"type": "shortcut", "shortcut": "ctrl+l", "typo": True}]
+            )
+        )
+
+    desktop.shortcut.assert_not_called()
+
+
+def test_batch_actions_runtime_failure_raises_when_stop_on_error_true() -> None:
+    desktop = FakeDesktop([_state()])
+    desktop.switch_app = MagicMock(return_value=("not found", 1))
+    tools = _register_tools(desktop)
+
+    with pytest.raises(RuntimeError, match="failed at action 0"):
+        asyncio.run(
+            tools["BatchActions"](
+                actions=[{"type": "switch_window", "name": "Missing"}]
+            )
+        )
+
+
+def test_batch_actions_continue_mode_reports_failure() -> None:
+    desktop = FakeDesktop([_state()])
+    desktop.switch_app = MagicMock(return_value=("not found", 1))
+    desktop.shortcut = MagicMock()
+    tools = _register_tools(desktop)
+
+    result = asyncio.run(
+        tools["BatchActions"](
+            actions=[
+                {"type": "switch_window", "name": "Missing"},
+                {"type": "shortcut", "shortcut": "escape"},
+            ],
+            stop_on_error=False,
+        )
+    )
+
+    payload = json.loads(result)
+    assert payload["ok"] is False
+    assert payload["completed"] == 1
+    desktop.shortcut.assert_called_once_with("escape")
 
 
 def test_wait_for_timeout_reports_last_observed_state() -> None:
